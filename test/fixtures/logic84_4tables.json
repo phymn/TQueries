@@ -1,0 +1,5 @@
+{"company":"84logic","tables":[
+{"name":"EMPLOYEES","columns":[{"name":"EMP_ID","type":"INTEGER"},{"name":"NAME","type":"TEXT"},{"name":"DEP_ID","type":"INTEGER"},{"name":"SALARY","type":"REAL"}],"rows":[[1,"Ana Torres",5,52000],[2,"Luis Pérez",7,61000],[3,"María Gómez",5,58000]]},
+{"name":"DEPARTMENTS","columns":[{"name":"DEP_ID","type":"INTEGER"},{"name":"DEP_NAME","type":"TEXT"}],"rows":[[5,"Software Development"],[7,"Design Team"]]},
+{"name":"PROJECTS","columns":[{"name":"PROJ_ID","type":"INTEGER"},{"name":"PROJ_NAME","type":"TEXT"},{"name":"DEP_ID","type":"INTEGER"},{"name":"BUDGET","type":"REAL"}],"rows":[[10,"84logic Portal",5,90000],[11,"Brand Refresh",7,30000]]},
+{"name":"ASSIGNMENTS","columns":[{"name":"ASSIGN_ID","type":"INTEGER"},{"name":"EMP_ID","type":"INTEGER"},{"name":"PROJ_ID","type":"INTEGER"},{"name":"HOURS","type":"INTEGER"}],"rows":[[100,1,10,120],[101,2,11,80],[102,3,10,40],[103,1,11,10]]}]}

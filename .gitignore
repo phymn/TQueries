@@ -1,0 +1,4 @@
+node_modules
+data/
+app/native/bin
+.DS_Store

@@ -1,0 +1,34 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TQueries</title><link rel="stylesheet" href="/style.css"></head><body>
+<header class="top"><div class="brand"><h1>TQueries</h1><p data-t="tag"></p></div>
+<div class="right"><span id="ai" class="pill"></span><button id="lang" class="ghost small">ES</button><button id="gear" class="ghost small">⚙︎</button></div></header>
+<main>
+<div id="notice" class="notice hidden"></div>
+<section class="card"><h2><span class="step">1</span><span data-t="s1"></span></h2><p class="sub" data-t="s1sub"></p>
+ <div class="row"><select id="saved"></select><input id="sname" data-ph="sname"><button id="save" class="ghost" data-t="save"></button><button id="new" class="ghost" data-t="new"></button></div>
+ <div id="drop" class="drop"><input id="file" type="file" accept="image/*" multiple hidden><b data-t="drop"></b><span data-t="drop2"></span></div>
+ <div id="thumbs" class="thumbs"></div>
+ <div class="row"><button id="read" class="primary" data-t="read" disabled></button><button id="manualBtn" class="ghost" data-t="manual"></button></div>
+ <div id="manual" class="hidden"><textarea id="mtext" rows="6" data-ph="mph"></textarea><button id="parse" class="ghost small" data-t="parse"></button></div>
+ <span id="checkSt" class="rc check"></span><div id="tables" class="tables"></div><button id="addT" class="ghost small" data-t="addT"></button>
+</section>
+<section class="card"><h2><span class="step">2</span><span data-t="s2"></span></h2>
+ <div class="row"><select id="dialect"></select><label class="sub"><input type="checkbox" id="fastOn"> <span data-t="fast"></span></label></div>
+ <textarea id="req" rows="3" data-ph="rph"></textarea>
+ <div class="row"><button id="go" class="primary" data-t="go"></button></div>
+</section>
+<section id="out" class="card hidden"><h2><span class="step">3</span><span data-t="s3"></span></h2>
+ <div class="codewrap"><pre id="sql"></pre><button id="copy" class="primary small" data-t="copy"></button></div>
+ <p id="expl" class="expl"></p><div id="timing" class="timing"></div><div id="check"></div>
+ <div class="row"><button id="test" class="primary" data-t="test"></button><button id="regen" class="ghost small" data-t="regen"></button></div>
+ <div id="result" class="hidden"><p id="rmeta" class="sub"></p><div class="gridwrap"><table id="grid"></table></div><p id="tnote" class="sub"></p></div>
+ <div id="fixbox" class="hidden"><textarea id="fix" rows="2" data-ph="fph"></textarea><div class="row"><button id="fixGo" class="primary" data-t="fixGo"></button></div></div>
+</section>
+</main>
+<dialog id="dlg"><h3 data-t="models"></h3>
+ <label><span data-t="vm"></span><input id="vm"></label><label><span data-t="vf"></span><input id="vf"></label><label><span data-t="sm"></span><input id="sm"></label><label><span data-t="fm"></span><input id="fm"></label><label><input type="checkbox" id="aid"> <span data-t="aid"></span></label>
+ <label><span data-t="eng"></span><select id="eng"><option value="qwen" data-t="engQwen"></option><option value="apple" data-t="engApple"></option></select></label>
+ <div class="row"><button id="benchBtn" class="ghost" data-t="bench"></button></div><div id="benchOut" class="bench"></div>
+ <div class="row end"><button id="dlgX" class="ghost" data-t="cancel"></button><button id="dlgOk" class="primary" data-t="save"></button></div></dialog>
+<footer><span id="ver"></span><span id="notes"></span></footer>
+<script src="/resize.js"></script><script src="/app.js"></script></body></html>
