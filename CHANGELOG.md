@@ -2,6 +2,9 @@
 
 Version names and notes come from the `VERSION` object in each saved version (`Versions/vX`). Exact dates before publishing were not recorded; the order is certain.
 
+## 2026-11-15 — API study guide
+- Added `docs/API-GUIDE.md`: every significant API this project calls, where it is used, what it does here, why it was chosen, plus a beginner glossary. Meant as a study guide (one API a day).
+
 ## 2026-11-14 — Documentation pass (no version bump)
 - Doc comments on every named function in `app/` and `test/`. Comments only. Every documented function/type got a comment saying what it does and why it calls each API. Proven behavior-identical: JavaScript token streams (comments excluded) are byte-equal to the previous version; Python ASTs are equal; Swift text is equal after stripping comments/whitespace.
 - Added `CHANGELOG.md` and `docs/DECISIONS.md`.
