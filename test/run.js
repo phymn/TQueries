@@ -3,6 +3,7 @@ const http = require('http'), assert = require('assert'), os = require('os'), fs
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tq-')); process.env.TQUERIES_HOME = home;
 const S = require('../app/lib/sql');
 let pass = 0, fail = 0; const tests = [];
+// test: Registers a test.
 const test = (n, f) => tests.push([n, f]);
 const schema = [{ name: 'Clients', columns: [{ name: 'ClientID', type: 'INTEGER' }, { name: 'Name', type: 'TEXT' }] },
   { name: 'Invoices', columns: [{ name: 'InvoiceID', type: 'INTEGER' }, { name: 'ClientID', type: 'INTEGER' }, { name: 'Total', type: 'REAL' }, { name: 'InvDate', type: 'TEXT' }] }];
@@ -36,11 +37,15 @@ const mock = http.createServer((q, s) => { let b = ''; q.on('data', c => b += c)
   if (j.images && photoRows) return s.end(JSON.stringify({ response: '{"tables":[{"name":"Clients","columns":["ClientID","Name"],"rows":[[7,"84logic"],[9,"Atlas Print"]]}]}' }));
   if (j.images) return s.end(JSON.stringify({ response: '{"tables":[{"name":"Clients","columns":[{"name":"ClientID","type":"INT"},"Name"]}]}' }));
   s.end(JSON.stringify({ response: '```sql\n' + GOOD + '\n```\nEXPLANATION: Suma por cliente.' })); }); });
+// call: POSTs to the server.
+// Why these APIs: fetch: loads the resource over HTTP(S) with streaming/abort support; JSON.stringify:
+//   serializes results into a plain string that can cross the script boundary.
 async function call(port, p, b) { const r = await fetch(`http://127.0.0.1:${port}${p}`, b ? { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` }, body: JSON.stringify(b) } : {}); return { status: r.status, j: await r.json() }; }
 (async () => {
   for (const [n, f] of tests) { try { await f(); pass++; console.log('✓', n); } catch (e) { fail++; console.log('✕', n, e.message); } }
   await new Promise(r => mock.listen(0, '127.0.0.1', r)); process.env.OLLAMA_HOST = 'http://127.0.0.1:' + mock.address().port;
   const { server, VERSION, sampleData, AUTO } = require('../app/server'); const MP = mock.address().port; AUTO.waitMs = 1200; AUTO.starter = () => true; await new Promise(r => server.listen(0, '127.0.0.1', r)); const P = server.address().port;
+  // st: Registers a server test.
   const st = async (n, f) => { try { await f(); pass++; console.log('✓', n); } catch (e) { fail++; console.log('✕', n, e.message); } };
   await st('state + footer version', async () => { const { j } = await call(P, '/api/state'); assert.equal(j.version.number, 'v0.5.4'); assert.equal(j.version.name, 'Gemma'); assert.ok(/any column/.test(j.version.notes.join(' '))); assert.ok(/v0\.5\.4/.test(j.version.notes[0])); assert.ok(j.ollama.running); });
   await st('index serves footer + UI', async () => { const h = await (await fetch(`http://127.0.0.1:${P}/`)).text(); assert.ok(h.includes('<footer>') && h.includes('id="copy"')); });

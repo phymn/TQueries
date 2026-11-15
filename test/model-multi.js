@@ -6,6 +6,8 @@ fs.mkdirSync(path.join(home, 'data'), { recursive: true });
 const F = require('./fixtures/logic84_4tables.json'), S = require('./standard12.js');
 const model = process.env.TQ_MODEL || 'qwen2.5-coder:14b';
 const four = F.tables.map(t => ({ ...t, rows: t.rows.map(r => r.map(String)) }));
+// has: True if all values appear.
+// Why these APIs: JSON.stringify: serializes results into a plain string that can cross the script boundary.
 const has = (r, ...v) => JSON.stringify(r.rows || []).includes(v[0]) && v.every(x => JSON.stringify(r.rows || []).includes(x));
 const Q = [
   ['4-table join', four, 'sqlite', 'Names of employees who work on projects of the Software Development department', r => has(r, 'Ana Torres', 'María Gómez') && !has(r, 'Luis')],
@@ -25,6 +27,9 @@ const Q = [
   const srv = require('../app/server.js'); const { server } = srv;
   fs.writeFileSync(path.join(home, 'data', 'settings.json'), JSON.stringify({ sqlModel: model, migrated053: true }));
   await new Promise(r => server.listen(0, '127.0.0.1', r)); const port = server.address().port;
+  // call: POSTs to the local server.
+  // Why these APIs: fetch: loads the resource over HTTP(S) with streaming/abort support; JSON.stringify:
+  //   serializes results into a plain string that can cross the script boundary.
   const call = (p, b) => fetch(`http://127.0.0.1:${port}${p}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` }, body: JSON.stringify(b) }).then(r => r.json());
   let ok = 0; console.log(`model ${model}`);
   for (const [n, tables, dialect, request, chk] of Q) { const t0 = Date.now(); const j = await call('/api/query', { tables, request, dialect, engine: 'none', lang: /Muestra/.test(request) ? 'es' : 'en' });

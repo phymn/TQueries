@@ -5,8 +5,11 @@ const TABLES = [
     ['E1002', 'Alice', 'James', '1972-07-31', '980 Berry ln, Elgin,IL', 80000, 5],
     ['E1003', 'Steve', 'Wells', '1980-08-10', '291 Springs, Gary,IL', 50000, 5]] },
   { name: 'DEPARTMENTS', columns: ['DEPT_ID_DEP', 'DEP_NAME'].map(name => ({ name, type: '' })), rows: [[5, 'Software Development'], [7, 'Design Team']] }];
+// today: Today's date.
 const today = () => { const d = new Date(); return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())); };
+// ageOn: Age on a date.
 const ageOn = (b, on) => { const [y, m, d] = b.split('-').map(Number); return on.getUTCFullYear() - y - ((on.getUTCMonth() + 1 < m || (on.getUTCMonth() + 1 === m && on.getUTCDate() < d)) ? 1 : 0); };
+// daysTo: Days to next birthday.
 const daysTo = b => { const t = today(), [, m, d] = b.split('-').map(Number); let n = new Date(Date.UTC(t.getUTCFullYear(), m - 1, d)); if (n <= t) n = new Date(Date.UTC(t.getUTCFullYear() + 1, m - 1, d)); return Math.round((n - t) / 864e5); };
 const B = ['1976-01-09', '1972-07-31', '1980-08-10'];
 // expect: list of columns that must each appear (in any result column) — values compared loosely (numbers ±0.01, strings trimmed)
@@ -24,7 +27,9 @@ const Q = [
   ['How many days until each employee\'s next birthday?', () => [B.map(daysTo)]],
   ['Show each employee\'s initials', [['JT', 'AJ', 'SW']]],
 ];
+// same: Compares values.
 const same = (a, b) => typeof b === 'number' ? a != null && Math.abs(Number(a) - b) < 0.01 : String(a ?? '').trim() === b;
+// correct: True if result columns match expected.
 function correct(result, want) { if (!result || !result.rows) return false; want = typeof want === 'function' ? want() : want;
   const cols = result.columns.map((_, i) => result.rows.map(r => r[i]));
   return want.every(w => cols.some(c => c.length === w.length && w.every((v, i) => same(c[i], v)))); }
