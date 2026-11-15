@@ -6,6 +6,8 @@ const T = S.normalizeTables([{ name: 'EMPLOYEES', columns: E.map(name => ({ name
   ['E1002', 'Alice', 'James', '123457', '1972-07-31', 'F', '980 Berry ln, Elgin,IL', '200', 80000, '30002', 5], ['E1003', 'Steve', 'Wells', '123458', '1980-08-10', 'M', '291 Springs, Gary,IL', '300', 50000, '30002', 5]] },
   { name: 'DEPARTMENTS', columns: D.map(name => ({ name })), rows: [[5, 'Software Development', '30002', 'L0002'], [7, 'Design Team', '30003', 'L0003']] }]);
 const data = Object.fromEntries(T.map(t => [t.name, t.rows]));
+// flat: Flattens rows.
+// Why these APIs: JSON.stringify: serializes results into a plain string that can cross the script boundary.
 const flat = r => JSON.stringify(r.rows);
 const CASES = [
   ['What is the department for James?', 'join-parent-of', r => r.rows.length === 1 && flat(r).includes('Software Development') && flat(r).includes('Alice')],

@@ -11,31 +11,54 @@ const OLLAMA = (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/
 const DEF = { visionModel: 'qwen2.5vl', visionFallback: 'llava', sqlModel: 'gemma4:e4b', sqlFastModel: '', keepAlive: '30m', aiSampleData: false, sqlEngine: 'qwen', patterns: true, nativeVision: true };
 // Per-task Ollama options: temperature 0, small context, capped output = short waits.
 const OPTS = { vision: { num_ctx: 6144, num_predict: 2048 }, sql: { num_ctx: 4096, num_predict: 400 }, data: { num_ctx: 4096, num_predict: 2048 } };
+// log: Timestamped log line.
+// Why these APIs: process: reads CLI args/env or exits with a status.
 const log = (...a) => { if (!process.env.TQ_QUIET) console.log('[TQ]', ...a); };
+// readJ: Reads a JSON file or default.
+// Why these APIs: JSON.parse: parses structured data; fs read: reads local files (nothing is uploaded).
 const readJ = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
+// writeJ: Writes a JSON file.
+// Why these APIs: JSON.stringify: serializes results into a plain string that can cross the script boundary; fs
+//   write: saves results locally.
 const writeJ = (f, v) => { const tmp = f + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(v, null, 2)); fs.renameSync(tmp, f); };
 // v0.5.3 "Swift Coder": GPU layers per model. 14b fits fully on a 24 GB Mac (no cap); qwen3-coder keeps its 40-layer cap.
 // Gemma 4 / qwen3 thinking models: think:false so the reply is just the SQL block (v0.5.3).
+// gpuFor: GPU layer setting for a model.
 const gpuFor = model => /qwen3-coder/i.test(model || '') ? { num_gpu: 40 } : {};
 // One-time move of a saved qwen3-coder / blank / untagged SQL model to 14b; qwen3-coder stays selectable in Settings.
+// migrate053: Migrates settings from v0.5.3.
 function migrate053() { const cur = readJ(SETTINGS, null); if (!cur || cur.migrated053) return;
   if (!cur.sqlModel || /^qwen3-coder/i.test(cur.sqlModel) || !cur.sqlModel.includes(':')) cur.sqlModel = DEF.sqlModel; // v0.5.4: gemma4:e4b; an explicit tagged choice (e.g. gemma4:e4b, qwen2.5-coder:14b) is never changed
   cur.migrated053 = true; writeJ(SETTINGS, cur); }
+// settings: Current settings with defaults.
 const settings = () => ({ ...DEF, ...readJ(SETTINGS, {}) });
 
 // v0.4.1: Ollama auto-start. If 127.0.0.1:11434 is unreachable, open it (macOS app / Windows app / Linux serve), wait up to ~30 s, then warm up.
 const { spawn } = require('child_process');
 const AUTO = { starting: false, tried: 0, waitMs: +process.env.TQ_OLLAMA_WAIT_MS || 30000, starter: null, lastStart: 0 };
+// startOllamaProcess: Starts Ollama if not running.
+// Why these APIs: child_process: runs a local helper program (no shell string building where avoidable); node:os
+//   / process.platform: adapts to the host OS; Ollama HTTP API (localhost): calls the local model server so
+//   prompts never leave the machine.
 function startOllamaProcess() {
   if (AUTO.starter) return AUTO.starter();
   const opt = { detached: true, stdio: 'ignore' };
+  // run: Runs a command.
+  // Why these APIs: child_process: runs a local helper program (no shell string building where avoidable).
   const run = (cmd, args) => { try { const c = spawn(cmd, args, opt); c.on('error', () => {}); c.unref(); return true; } catch { return false; } };
   if (process.platform === 'darwin') return run('open', ['-a', 'Ollama']);
   if (process.platform === 'win32') return run('cmd', ['/c', 'start', '""', 'ollama app']) || run('ollama', ['serve']);
   return run('ollama', ['serve']);
 }
+// ollamaUp: True if the local Ollama server answers.
+// Why these APIs: fetch: loads the resource over HTTP(S) with streaming/abort support; AbortController: cancels
+//   a request or wait that ran too long; Ollama HTTP API (localhost): calls the local model server so prompts
+//   never leave the machine.
 async function ollamaUp() { try { const r = await fetch(OLLAMA + '/api/version', { signal: AbortSignal.timeout(1500) }); return r.ok; } catch { return false; } }
 let ensuring = null;
+// ensureOllama: Ensures Ollama is up, starting it if needed.
+// Why these APIs: setTimeout: defers or delays work without blocking; Ollama HTTP API (localhost): calls the
+//   local model server so prompts never leave the machine.
 async function ensureOllama() {
   if (await ollamaUp()) return true;
   if (!/^http:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(OLLAMA)) return false; // only start a local Ollama
@@ -48,15 +71,29 @@ async function ensureOllama() {
   return ensuring;
 }
 let lastWarm = 0;
+// ollamaTags: Lists installed local models.
+// Why these APIs: fetch: loads the resource over HTTP(S) with streaming/abort support; AbortController: cancels
+//   a request or wait that ran too long; Ollama HTTP API (localhost): calls the local model server so prompts
+//   never leave the machine.
 async function ollamaTags() {
   try { const r = await fetch(OLLAMA + '/api/tags', { signal: AbortSignal.timeout(2500) }); if (!r.ok) throw 0;
     return { running: true, models: ((await r.json()).models || []).map(m => m.name) }; }
   catch { return { running: false, models: [] }; }
 }
+// has: True if a model is installed.
 const has = (models, want) => models.some(m => m === want || m.split(':')[0] === want.split(':')[0] && !want.includes(':'));
+// Friendly: Friendly error type.
 class Friendly extends Error { constructor(code, extra) { super(code); this.code = code; Object.assign(this, extra); } }
+// generate: Calls the local model with a prompt (and images).
+// Why these APIs: fetch: loads the resource over HTTP(S) with streaming/abort support; JSON.stringify:
+//   serializes results into a plain string that can cross the script boundary; Ollama HTTP API (localhost):
+//   calls the local model server so prompts never leave the machine.
 async function generate(model, prompt, images, json, task = 'sql', timing) {
   const t0 = Date.now();
+  // req: Single HTTP request to Ollama.
+  // Why these APIs: fetch: loads the resource over HTTP(S) with streaming/abort support; JSON.stringify:
+  //   serializes results into a plain string that can cross the script boundary; Ollama HTTP API (localhost):
+  //   calls the local model server so prompts never leave the machine.
   const req = () => fetch(OLLAMA + '/api/generate', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model, prompt, images, stream: false, keep_alive: settings().keepAlive || '30m', ...(json ? { format: 'json' } : {}), ...(/gemma|qwen3(?!-coder)/i.test(model) ? { think: false } : {}), options: { temperature: 0, ...(OPTS[task] || OPTS.sql), ...(task === 'vision' ? {} : gpuFor(model)) } }) });
   const r = await req().catch(async () => { if (await ensureOllama()) return req().catch(() => { throw new Friendly('ollama_down'); }); throw new Friendly('ollama_down'); });
@@ -67,6 +104,8 @@ async function generate(model, prompt, images, json, task = 'sql', timing) {
   if (timing) timing[task] = { ms, loadMs: load, model };
   return j.response || '';
 }
+// pickModel: Picks the best installed model for a task.
+// Why these APIs: Ollama HTTP API (localhost): calls the local model server so prompts never leave the machine.
 async function pickModel(kind, fast) {
   const st = settings(); let t = await ollamaTags();
   if (!t.running && await ensureOllama()) t = await ollamaTags();
@@ -75,14 +114,21 @@ async function pickModel(kind, fast) {
   for (const o of opts) { if (!o) continue; const hit = t.models.find(m => m === o) || (has(t.models, o) && t.models.find(m => m.split(':')[0] === o)); if (hit) return hit; }
   throw new Friendly('model_missing', { model: opts[0] });
 }
+// body: Reads a request body with a size limit.
+// Why these APIs: JSON.parse: parses structured data; Buffer: handles raw bytes.
 function body(req, limit = 40e6) {
   return new Promise((ok, no) => { let n = 0, b = []; req.on('data', c => { n += c.length; if (n > limit) { no(new Friendly('too_big')); req.destroy(); } else b.push(c); });
     req.on('end', () => { try { ok(b.length ? JSON.parse(Buffer.concat(b)) : {}); } catch { no(new Friendly('bad_json')); } }); });
 }
+// send: Sends a JSON response.
+// Why these APIs: JSON.stringify: serializes results into a plain string that can cross the script boundary.
 const send = (res, code, v) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(v)); };
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 
 // Practice data: photo rows win; else deterministic generator (instant). Local-model data only if turned on.
+// sampleData: Gets cached or new sample data for a schema.
+// Why these APIs: JSON.stringify: serializes results into a plain string that can cross the script boundary;
+//   JSON.parse: parses structured data; node:path: builds file paths portably across macOS/Windows.
 async function sampleData(tables, regenerate, useAi = settings().aiSampleData) {
   const key = TD.schemaHash(tables) + (useAi ? '-ai' : ''), f = path.join(SAMPLES, key + '.json');
   let cache = regenerate ? null : readJ(f, null);
@@ -101,9 +147,11 @@ async function sampleData(tables, regenerate, useAi = settings().aiSampleData) {
   const fks = TD.fixFks(tables, data, source);
   return { data, source, fks, counts: Object.fromEntries(tables.map(t => [t.name, data[t.name].length])) };
 }
+// txnTranslate: Translates transaction statements for testing.
 function txnTranslate(sql, dialect, tables) { const p = TD.splitSql(sql), notes = []; let changed = false;
   const out = p.map(x => { if (dialect === 'sqlite' || /^(begin|start|set\s+transaction|commit|rollback)\b/i.test(x)) return x; const t = TD.translate(x, dialect, tables); changed = changed || t.changed; notes.push(...(t.notes || [])); return t.sql.replace(/;\s*$/, ''); });
   return { sql: out.join(';\n') + ';', changed, notes }; }
+// testQuery: Runs the query on sample data.
 async function testQuery(b) { const t0 = Date.now();
   const tables = S.normalizeTables(b.tables || []); if (!tables.length) throw new Friendly('no_schema');
   const sql = String(b.sql || '').trim(), dialect = S.DIALECTS[b.dialect] ? b.dialect : 'postgresql';
@@ -121,6 +169,7 @@ async function testQuery(b) { const t0 = Date.now();
 }
 const routes = {
   'POST /api/test': testQuery,
+  // POST /api/fix: API: fix a query.
   'POST /api/fix': async b => {
     const tables = S.normalizeTables(b.tables || []); const fix = String(b.fix || '').trim(), sql0 = String(b.sql || '').trim();
     if (!tables.length) throw new Friendly('no_schema'); if (!fix) throw new Friendly('no_fix'); if (!sql0) throw new Friendly('no_request');
@@ -128,23 +177,34 @@ const routes = {
     const raw = await generate(model, S.fixPrompt({ tables, dialect, sql: sql0, request: b.request, fix, lang: b.lang, result: b.result ? String(b.result).slice(0, 600) : '' }));
     const { sql, explanation } = S.extractSql(raw); const check = S.validate(sql, tables);
     return { model, dialect, sql, explanation, check }; },
+  // GET /api/state: API: current state.
+  // Why these APIs: node:os / process.platform: adapts to the host OS; Ollama HTTP API (localhost): calls the
+  //   local model server so prompts never leave the machine.
   'GET /api/state': async () => { if (require.main === module) warmUp(); const o = await ollamaTags(); if (!o.running && require.main === module && Date.now() - AUTO.lastStart > 45000) ensureOllama(); return { version: VERSION, settings: settings(), native: { platform: process.platform, ready: !!N.state.bin, error: N.state.error }, ollama: { ...o, starting: AUTO.starting }, dialects: Object.fromEntries(Object.entries(S.DIALECTS).map(([k, v]) => [k, v.name])) }; },
+  // POST /api/settings: API: save settings.
   'POST /api/settings': async b => { const cur = readJ(SETTINGS, {}); for (const k of Object.keys(DEF)) { if (typeof DEF[k] === 'boolean') { if (typeof b[k] === 'boolean') cur[k] = b[k]; }
     else if (typeof b[k] === 'string' && (b[k].trim() || k === 'sqlFastModel')) cur[k] = b[k].trim(); } if (cur.sqlEngine && !['qwen', 'apple'].includes(cur.sqlEngine)) cur.sqlEngine = 'qwen'; writeJ(SETTINGS, cur); return settings(); },
+  // GET /api/schemas: API: saved schemas.
   'GET /api/schemas': async () => readJ(SCHEMAS, []),
+  // POST /api/schemas: API: save a schema.
   'POST /api/schemas': async b => { // save (upsert by id); never deletes other schemas
     const list = readJ(SCHEMAS, []); const name = String(b.name || '').trim() || 'Untitled';
     const tables = S.normalizeTables(b.tables || []); const id = b.id || Date.now().toString(36);
     const i = list.findIndex(x => x.id === id); const rec = { id, name, tables, updated: new Date().toISOString() };
     if (i >= 0) list[i] = rec; else list.push(rec); writeJ(SCHEMAS, list); return rec; },
+  // POST /api/bench: API: run benchmark.
   'POST /api/bench': async b => runBench(b.engines),
+  // POST /api/parse-schema: API: parse schema text.
   'POST /api/parse-schema': async b => ({ tables: S.parseSchemaText(b.text) }),
+  // POST /api/read-image: API: read tables from images.
+  // Why these APIs: node:os / process.platform: adapts to the host OS.
   'POST /api/read-image': async b => {
     const imgs = (b.images || []).map(x => String(x).replace(/^data:[^,]+,/, '')).filter(Boolean);
     if (!imgs.length) throw new Friendly('no_image');
     const timing = {}, t0 = Date.now(); let tables = [], model = null;
     let checkId = null;
     if (settings().nativeVision !== false) try { const r = await N.readFast(imgs, log); // v0.5.2: Vision positions now, Apple's CSV check in the background
+      // shape: Shapes read tables for the UI.
       const shape = list => { const tb = (list || []).filter(t => t.columns && t.columns.length).map((t, i) => ({ name: guessName(t, i), columns: t.columns, rows: t.rows, flags: t.flags || [] }));
         return S.normalizeTables(tb).map((t, i) => (tb[i] && tb[i].flags.length ? { ...t, flags: tb[i].flags } : t)); };
       tables = shape(r.tables);
@@ -162,7 +222,10 @@ const routes = {
     if (!merged.length) throw new Friendly('no_tables', { model });
     for (const t of merged) if (t.rows) t.rows = t.rows.slice(0, 20);
     return { model, tables: merged, ms: Date.now() - t0, timing, checkId }; },
+  // GET /api/check: API: poll a background check.
   'GET /api/check': async (b, u) => { const j = CHECKS.get(String(u && u.searchParams.get('id'))); if (!j) throw new Friendly('no_check'); return j.done ? { state: 'done', ...j.done } : j.error ? { state: 'failed', error: j.error } : { state: 'running' }; },
+  // POST /api/query: API: generate SQL for a request.
+  // Why these APIs: JSON.stringify: serializes results into a plain string that can cross the script boundary.
   'POST /api/query': async b => {
     const tables = S.normalizeTables(b.tables || []); const request = String(b.request || '').trim();
     if (!tables.length) throw new Friendly('no_schema'); if (!request) throw new Friendly('no_request');
@@ -188,6 +251,7 @@ const routes = {
     timing.sql = { ...(timing.sql || {}), engine: 'qwen' };
     return finish(b, tables, dialect, model, sql, explanation, input, timing, t0); },
 };
+// finish: Validates, tests and returns a generated query.
 async function finish(b, tables, dialect, model, sql, explanation, input, timing, t0, pattern) {
     const check = S.validate(sql, tables);
     check.input = input; if (!input.ok) { check.ok = false; check.problems = [...(check.problems || []), ...input.missing.map(v => 'input_missing:' + v), ...input.swapped.map(v => 'input_swapped:' + v), ...input.wrongColumn.map(w => 'input_column:' + w.value)]; }
@@ -199,6 +263,7 @@ async function finish(b, tables, dialect, model, sql, explanation, input, timing
     log(`query: total ${Date.now() - t0} ms (${out.engine} ${timing.sql?.ms} ms, test ${timing.test?.ms ?? '-'} ms)`);
     return out; }
 // v0.5: instant engines. 'auto' = pattern, then the chosen engine; 'pattern' / 'apple' / 'qwen' force one (benchmark).
+// fastSql: Fast SQL path (patterns, then Apple model).
 async function fastSql(tables, request, dialect, lang, engine) {
   const st = settings();
   if (engine === 'auto' || engine === 'pattern') { const m = P.match(tables, request, dialect, lang);
@@ -211,16 +276,19 @@ async function fastSql(tables, request, dialect, lang, engine) {
 }
 // v0.5.2: background cell checks (kept in memory, newest 20)
 const CHECKS = new Map(); let checkN = 0;
+// startCheck: Starts a background check job.
 function startCheck(p) { const id = 'c' + Date.now().toString(36) + (++checkN), j = { started: Date.now() }; CHECKS.set(id, j);
   p.then(x => { j.done = x; }, e => { j.error = e.message || 'failed'; log('read-image check failed: ' + j.error); });
   while (CHECKS.size > 20) CHECKS.delete(CHECKS.keys().next().value); return id; }
 // cells the check changed vs the first reading get an extra 'updated' flag (unless already flagged)
+// updated: Cells changed by the check.
 function updated(before, after) { return after.map(t => { const b = before.find(x => x.name === t.name); const flags = [...(t.flags || [])];
   if (b && b.rows && t.rows) t.rows.forEach((row, r) => row.forEach((v, c) => { const o = b.rows[r] ? b.rows[r][c] : undefined;
     if (String(o ?? '') !== String(v ?? '') && !flags.some(f => f.r === r && f.c === c)) flags.push({ r, c, alt: String(o ?? ''), why: 'updated' }); }));
   if (b) t.columns.forEach((col, c) => { const o = b.columns[c]; if (o && o.name !== col.name && !flags.some(f => f.r === -1 && f.c === c)) flags.push({ r: -1, c, alt: o.name, why: 'updated' }); });
   return flags.length ? { ...t, flags } : t; }); }
 // Table name from the photo's title, else from the id column (EMP_ID → EMPLOYEES), else TABLE1…
+// guessName: Guesses a table name from columns.
 function guessName(t, i) { if (t.title && /\w/.test(t.title)) return String(t.title).trim().toUpperCase().replace(/\W+/g, '_').replace(/^_|_$/g, '');
   const id = (t.columns || []).map(String).find(c => /^[A-Za-z]+_?ID$/i.test(c.replace(/\s/g, '')));
   const map = { EMP: 'EMPLOYEES', DEPT: 'DEPARTMENTS', DEP: 'DEPARTMENTS', CUST: 'CUSTOMERS', PROD: 'PRODUCTS', ORD: 'ORDERS' };
@@ -242,6 +310,10 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'content-type': MIME[path.extname(f)] || 'application/octet-stream' }); fs.createReadStream(f).pipe(res);
 });
 // Warm-up: load the SQL model into memory at launch (empty prompt = load only), so the first question is fast.
+// warmUp: Warms up the model at startup.
+// Why these APIs: fetch: loads the resource over HTTP(S) with streaming/abort support; JSON.stringify:
+//   serializes results into a plain string that can cross the script boundary; Ollama HTTP API (localhost):
+//   calls the local model server so prompts never leave the machine.
 async function warmUp() { if (Date.now() - lastWarm < 60000) return; lastWarm = Date.now();
   try { const model = await pickModel('sql'); const t = Date.now();
     await fetch(OLLAMA + '/api/generate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model, prompt: '', keep_alive: settings().keepAlive || '30m', options: { num_ctx: OPTS.sql.num_ctx, ...gpuFor(model) } }) });
@@ -249,6 +321,8 @@ async function warmUp() { if (Date.now() - lastWarm < 60000) return; lastWarm = 
 if (require.main === module) migrate053();
 if (require.main === module) server.listen(PORT, '127.0.0.1', () => { console.log(`TQueries ${VERSION.number} → http://127.0.0.1:${PORT}  (data: ${DATA})`); ensureOllama().then(up => up && warmUp()); if (process.platform === 'darwin') N.ensure().then(async b => { log(b ? 'Apple on-device helper ready' : 'Apple helper not built: ' + (N.state.error || 'unavailable')); if (b && settings().nativeVision !== false) try { const w = await N.warm(); log(`warm-up Apple Vision + model: ${w.ms} ms`); } catch (e) { log('Apple warm-up skipped: ' + e.message); } }); });
 // v0.5 benchmark: the 12 standard questions × engines, timed, results checked on the practice DB.
+// runBench: Runs the standard benchmark across engines.
+// Why these APIs: Ollama HTTP API (localhost): calls the local model server so prompts never leave the machine.
 async function runBench(engines = ['pattern', 'apple', 'qwen'], dialect = 'sqlite') {
   const F = require('../test/standard12'), tables = S.normalizeTables(F.TABLES), out = {};
   for (const e of engines) { const rows = []; let ok = 0, ms = 0;

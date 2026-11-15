@@ -10,6 +10,9 @@ process.env.TQUERIES_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tq-bench-'));
 const { server } = require('../app/server');
 (async () => {
   await new Promise(r => server.listen(0, '127.0.0.1', r)); const P = server.address().port;
+  // call: POSTs to the local server.
+  // Why these APIs: fetch: loads the resource over HTTP(S) with streaming/abort support; JSON.stringify:
+  //   serializes results into a plain string that can cross the script boundary.
   const call = async (p, b) => { const r = await fetch(`http://127.0.0.1:${P}${p}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${P}` }, body: JSON.stringify(b) }); const j = await r.json(); if (!r.ok) throw new Error(p + ': ' + JSON.stringify(j)); return j; };
   const st = await (await fetch(`http://127.0.0.1:${P}/api/state`)).json();
   if (!st.ollama.running) { console.log('Ollama is not running. Open Ollama and try again.'); process.exit(1); }
