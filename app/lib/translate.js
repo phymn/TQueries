@@ -1,30 +1,41 @@
 // Dialect SQL -> SQLite (practice copy only). Literals are masked while rewriting.
 const STRFN = /^(left|right|substring|substr|mid|upper|lower|ucase|lcase|ltrim|rtrim|trim|replace|concat|concat_ws|format|datename|char|nchar|str|stuff|replicate|space|reverse|lpad|rpad|initcap|string_agg|convert|cast|try_cast|try_convert|monthname|dayname|soundex|quotename|coalesce|isnull|nz|iif)$/i;
+// textCols: Text columns of all tables.
 function textCols(tables) { const set = new Set();
   for (const t of tables || []) (t.columns || []).forEach((c, i) => { const n = String(c.name || c).toLowerCase(), ty = String(c.type || '').toLowerCase();
     const vals = (t.rows || []).map(r => r[i]).filter(v => v != null && v !== '');
     if (/char|text|string|varchar/.test(ty) || (vals.length && vals.some(v => !/^-?\d+(\.\d+)?$/.test(String(v).trim())) && !vals.every(v => /^\d{4}-\d{2}-\d{2}/.test(String(v))))) set.add(n); });
   return set; }
+// match: Finds the matching bracket.
 function match(s, i, dir) { let d = 0; for (let j = i; j >= 0 && j < s.length; j += dir) { const c = s[j]; if (c === '(') d += dir; else if (c === ')') d -= dir; if (d === 0) return j; } return -1; }
+// leftOp: Finds the left operand.
 function leftOp(s, i) { let j = i - 1; while (j >= 0 && /\s/.test(s[j])) j--; const end = j + 1;
   if (s[j] === ')') { j = match(s, j, -1); if (j < 0) return null; j--; while (j >= 0 && /[\w.]/.test(s[j])) j--; return { start: j + 1, end }; }
   if (s[j] === '\u0000') { j--; while (j >= 0 && s[j] !== '\u0000') j--; return { start: j, end }; }
   if (s[j] === '"') { j--; while (j >= 0 && s[j] !== '"') j--; j--; while (j >= 0 && /[\w."]/.test(s[j])) j--; return { start: j + 1, end }; }
   while (j >= 0 && /[\w.]/.test(s[j])) j--; return j + 1 < end ? { start: j + 1, end } : null; }
+// rightOp: Finds the right operand.
 function rightOp(s, i) { let j = i; while (j < s.length && /\s/.test(s[j])) j++; const start = j;
   if (s[j] === '\u0000') { j++; while (j < s.length && s[j] !== '\u0000') j++; return { start, end: j + 1 }; }
   if (s[j] === '(') { const k = match(s, j, 1); return k < 0 ? null : { start, end: k + 1 }; }
   if (s[j] === '-' || s[j] === '+') j++;
   while (j < s.length && /[\w."]/.test(s[j])) j++; if (s[j] === '(') { const k = match(s, j, 1); if (k < 0) return null; j = k + 1; }
   return j > start ? { start, end: j } : null; }
+// splitTop: Splits on top-level separators.
 function splitTop(t, sep = ',') { const out = []; let d = 0, cur = ''; for (const c of t) { if (c === '(') d++; else if (c === ')') d--; if (c === sep && d === 0) { out.push(cur); cur = ''; } else cur += c; } out.push(cur); return out.map(x => x.trim()); }
+// translate: Translates a dialect query (SQL Server, MySQL, Postgres, Oracle) into SQLite plus helper UDFs so it
+// can be tested locally.
 function translate(sql, dialect, tables) {
   let s = String(sql).trim().replace(/;\s*$/, ''), notes = [];
   const lits = []; s = s.replace(/'(?:[^']|'')*'/g, m => (lits.push(m), `\u0000${lits.length - 1}\u0000`));
+  // lit: Protects a literal during rewriting.
   const lit = t => { const m = /^\u0000(\d+)\u0000$/.exec(String(t).trim()); return m ? lits[m[1]].slice(1, -1).replace(/''/g, "'") : null; };
+  // mk: Placeholder token.
   const mk = v => (lits.push("'" + String(v).replace(/'/g, "''") + "'"), `\u0000${lits.length - 1}\u0000`);
+  // rep: Regex replacement with a note.
   const rep = (re, to, note) => { const b = s; s = s.replace(re, to); if (b !== s) notes.push(note); };
   // fx: rewrite calls NAME(args) right-to-left (inner first). cb(args, NAME, rawInner, after) -> string | [string, consumed] | null
+  // fx: Rewrites function calls by name.
   const fx = (names, cb) => { const re = new RegExp('(?<![\\w."])(' + names + ')\\s*\\(', 'gi'); const pos = []; let m; while ((m = re.exec(s))) pos.push([m.index, m[1], m.index + m[0].length - 1]);
     for (const [at, name, open] of pos.reverse()) { const close = match(s, open, 1); if (close < 0) continue; const inner = s.slice(open + 1, close);
       const r = cb(inner.trim() === '' ? [] : splitTop(inner), name.toUpperCase(), inner, s.slice(close + 1)); if (r == null) continue;
@@ -41,6 +52,7 @@ function translate(sql, dialect, tables) {
   rep(/\bwith\s*\(\s*nolock\s*\)/gi, '', 'NOLOCK'); rep(/::\s*\w+(?:\s+precision)?(\s*\([\d,\s]*\))?/gi, '', '::cast');
   // String concatenation with + (SQL Server / Access) when either side is text.
   if (ss || acc) { const tc = textCols(tables);
+    // isStr: True if an operand is a string.
     const isStr = (o) => { if (!o) return false; const t = s.slice(o.start, o.end).trim(); if (t[0] === '\u0000') return true; if (t[0] === '(') return /\|\||\u0000/.test(t) && !/^\(\s*select/i.test(t);
       const fm = t.match(/^([\w.]+)\s*\(/); if (fm) { const n = fm[1].split('.').pop(); return STRFN.test(n) && (!/^(cast|convert|try_cast|try_convert)$/i.test(n) || /char|text|string/i.test(t)) && !(/^(coalesce|isnull|nz|iif)$/i.test(n) && !/\u0000|\|\|/.test(t)); }
       return tc.has(t.replace(/"/g, '').split('.').pop().toLowerCase()); };
@@ -53,7 +65,9 @@ function translate(sql, dialect, tables) {
   if (pg || ora) { const dateish = t => /current_date|curdate|now\s*\(|sysdate|getdate|date|_dt\b|birth|dob|^\u0000\d+\u0000$/i.test(t) && !/^\d+(\.\d+)?$/.test(t) && !/^\u0000/.test(t) || (/^\u0000/.test(t) && /^\d{4}-\d{2}-\d{2}/.test(lit(t) || ''));
     for (let i = s.length - 1; i > 0; i--) if (s[i] === '-' && s[i - 1] !== '-' && s[i + 1] !== '-') { const l = leftOp(s, i), r = rightOp(s, i + 1); if (!l || !r) continue;
       const a = s.slice(l.start, l.end), b = s.slice(r.start, r.end); if (dateish(a) && dateish(b) && !/^DATEADD/i.test(b)) { s = s.slice(0, l.start) + `TQ_DAYS(${a}, ${b})` + s.slice(r.end); notes.push('date-date'); i = l.start; } } }
+  // U: Uppercases.
   const U = s => String(s).replace(/^'|'$/g, '');
+  // unit: Normalizes a date unit.
   const unit = a => { const l = lit(a); return mk(l != null ? l : String(a).replace(/^'|'$/g, '')); };
   // ---- dates
   rep(/\bcurrent_date\b(\s*\(\s*\))?/gi, 'CURDATE()', 'CURRENT_DATE'); rep(/\b(sysdate|current_timestamp|localtimestamp|systimestamp)\b(\s*\(\s*\))?/gi, 'NOW()', 'SYSDATE');
@@ -77,6 +91,7 @@ function translate(sql, dialect, tables) {
   fx('format', (a, n) => ss ? `NETFORMAT(${a[0]}, ${a[1] || "''"})` : my ? `TQ_MYNUM(${a[0]}, ${a[1] || 0})` : acc ? `VBFORMAT(${a[0]}, ${a[1] || "''"})` : null);
   if (pg) fx('to_char', a => `TQ_PGCHAR(${a[0]}, ${a[1] || 'NULL'})`); else fx('to_char', a => a.length === 1 ? `CAST(${a[0]} AS TEXT)` : null);
   // ---- casts
+  // castT: CAST into SQLite-friendly form.
   const castT = (x, t) => { t = t.trim(); const m = t.match(/^(\w+)\s*(?:\(\s*(\w+)\s*(?:,\s*(\d+))?\s*\))?/); const k = (m ? m[1] : t).toLowerCase();
     if (k === 'date') return `TQ_TODATE(${x})`; if (/^(datetime2?|timestamp|smalldatetime|datetimeoffset)$/.test(k)) return `TQ_TODT(${x})`;
     if (/^(decimal|numeric|number|money|smallmoney|dec)$/.test(k)) return m[3] != null ? `TQ_ROUND(CAST(${x} AS REAL), ${m[3]})` : (k === 'number' && !m[2]) ? `CAST(${x} AS REAL)` : m[2] != null && k !== 'money' ? `TQ_ROUND(CAST(${x} AS REAL), 0)` : `CAST(${x} AS REAL)`;
@@ -124,6 +139,7 @@ function translate(sql, dialect, tables) {
   fx('pow', a => `POWER(${a.join(', ')})`); fx('square', a => `((${a[0]}) * (${a[0]}))`);
   fx('log', a => a.length === 1 ? ((pg || ora) ? `LOG10(${a[0]})` : `LN(${a[0]})`) : (ss ? `(LN(${a[0]}) / LN(${a[1]}))` : `(LN(${a[1]}) / LN(${a[0]}))`));
   if (my) rep(/\bdiv\b/gi, '/', 'DIV');
+  // sd: Standard deviation/variance mapping.
   const sd = (pop, sq) => (a, n, raw, after) => { const w = after.match(/^\s*over\s*\(/i); const x = a[0].replace(/^distinct\s+/i, '');
     if (!w) return `${sq ? 'TQ_STDEV' : 'TQ_VAR'}${pop ? 'P' : ''}(${x})`; const o = after.indexOf('('), c = match(after, o, 1), ov = 'OVER (' + after.slice(o + 1, c) + ')';
     const v = `((SUM((${x}) * (${x})) ${ov} - SUM(${x}) ${ov} * SUM(${x}) ${ov} / COUNT(${x}) ${ov}) / (COUNT(${x}) ${ov}${pop ? '' : ' - 1'}))`; return [sq ? `SQRT(${v})` : v, c + 1]; };

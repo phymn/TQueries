@@ -16,15 +16,23 @@ import ImageIO
 import FoundationModels
 #endif
 
+/// Table: Table returned to Node.
 struct Table: Codable { var title: String?; var columns: [String]; var rows: [[String]] }
+/// Out: Output envelope.
 struct Out: Codable { var tables: [Table]; var ms: Int; var engine: String }
 
+/// emit: Prints a value as JSON.
+/// Why these APIs: JSONEncoder: returns results as JSON to the Node server.
 func emit<T: Encodable>(_ v: T) { let e = JSONEncoder(); if let d = try? e.encode(v), let s = String(data: d, encoding: .utf8) { print(s) } }
+/// fail: Prints an error and exits.
 func fail(_ msg: String) -> Never { emit(["error": msg]); exit(1) }
+/// nowMs: Current time in ms.
 func nowMs() -> Double { Date().timeIntervalSince1970 * 1000 }
+/// clean: Cleans a cell string.
 func clean(_ s: String) -> String { s.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines) }
 
 // A grid of cell strings → Table (first non-empty row = header).
+/// toTable: Grid to Table (first non-empty row is the header).
 func toTable(_ grid: [[String]], title: String? = nil) -> Table? {
   let g = grid.map { $0.map(clean) }.filter { $0.contains { !$0.isEmpty } }
   guard let head = g.first, head.count >= 1, g.count >= 1 else { return nil }
@@ -35,6 +43,7 @@ func toTable(_ grid: [[String]], title: String? = nil) -> Table? {
 }
 
 // macOS 26+: Vision reads document structure (tables) directly.
+/// readDocuments: Reads tables with Apple's document reader (macOS 26+).
 func readDocuments(_ url: URL) async throws -> [Table]? {
   #if compiler(>=6.2)
   if #available(macOS 26.0, *) {
@@ -50,7 +59,11 @@ func readDocuments(_ url: URL) async throws -> [Table]? {
 }
 
 // Fallback (any macOS): recognise text lines, then cluster boxes into rows (by y) and columns (by x).
+/// Word: OCR word.
 struct Word { let text: String; let x0: Double; let x1: Double; let y: Double; let h: Double }
+/// readText: Reads text lines with Vision OCR.
+/// Why these APIs: Vision (VNRecognizeTextRequest): runs Apple on-device OCR (uses the Neural Engine when it
+///   helps).
 func readText(_ url: URL) throws -> [Table] {
   let req = VNRecognizeTextRequest(); req.recognitionLevel = .accurate; req.usesLanguageCorrection = false
   try VNImageRequestHandler(url: url, options: [:]).perform([req])
@@ -78,8 +91,13 @@ func readText(_ url: URL) throws -> [Table] {
 }
 
 
+/// WordBox: Word box output.
 struct WordBox: Codable { var t: String; var x0: Double; var x1: Double; var y0: Double; var y1: Double }
+/// WordsOut: Words output envelope.
 struct WordsOut: Codable { var words: [WordBox]; var w: Int; var h: Int; var ms: Int }
+/// readWords: Returns OCR word boxes (0..1, top-left origin).
+/// Why these APIs: Vision (VNRecognizeTextRequest): runs Apple on-device OCR (uses the Neural Engine when it
+///   helps); CoreGraphics/AppKit images: loads the screenshot pixels for Vision.
 func readWords(_ url: URL) throws -> WordsOut {
   let t0 = nowMs()
   let req = VNRecognizeTextRequest(); req.recognitionLevel = .accurate; req.usesLanguageCorrection = false
@@ -99,6 +117,8 @@ func readWords(_ url: URL) throws -> WordsOut {
   return WordsOut(words: out, w: w, h: h, ms: Int(nowMs() - t0))
 }
 let CSV_RULES = "Convert the table in this image to CSV. Rules: fields separated by commas; first line is the header row; then exactly one line per table row; every cell is its own field; a header or cell whose text wraps onto two lines is ONE field (join with a space); wrap any field containing a comma in double quotes; copy every character exactly, digit by digit; never guess, never add rows or columns. Output only the CSV."
+/// fmCSV: Has the on-device Foundation Model read crops as CSV.
+/// Why these APIs: CoreGraphics/AppKit images: loads the screenshot pixels for Vision.
 func fmCSV(_ url: URL, _ rects: [[Double]]) async throws -> [String] {
   #if canImport(FoundationModels)
   if #available(macOS 27.0, *) {
@@ -119,19 +139,28 @@ func fmCSV(_ url: URL, _ rects: [[Double]]) async throws -> [String] {
   #endif
   throw NSError(domain: "fm_image_unavailable", code: 1)
 }
+/// fmWarm: Pre-warms the Foundation Model.
 func fmWarm() {
   #if canImport(FoundationModels)
   if #available(macOS 26.0, *) { if case .available = SystemLanguageModel.default.availability { LanguageModelSession().prewarm() } }
   #endif
 }
+/// toJSON: Encodes to JSON.
+/// Why these APIs: JSONEncoder: returns results as JSON to the Node server.
 func toJSON(_ v: Any) -> String { (try? JSONSerialization.data(withJSONObject: v)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}" }
+/// enc: Encodes a value.
+/// Why these APIs: JSONEncoder: returns results as JSON to the Node server.
 func enc<T: Encodable>(_ v: T) -> Any { (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(v))) ?? [:] }
 
+/// readStdin: Reads stdin JSON.
+/// Why these APIs: JSONEncoder: returns results as JSON to the Node server; FileManager/FileHandle: reads input
+///   files / writes stdout.
 func readStdin() -> [String: Any] {
   let d = FileHandle.standardInput.readDataToEndOfFile()
   return ((try? JSONSerialization.jsonObject(with: d)) as? [String: Any]) ?? [:]
 }
 
+/// fmAvailable: True if Apple Intelligence model is available.
 func fmAvailable() -> Bool {
   #if canImport(FoundationModels)
   if #available(macOS 26.0, *) { if case .available = SystemLanguageModel.default.availability { return true } }
@@ -139,6 +168,7 @@ func fmAvailable() -> Bool {
   return false
 }
 
+/// askFM: Asks the Foundation Model a prompt.
 func askFM(_ instructions: String, _ prompt: String) async throws -> String? {
   #if canImport(FoundationModels)
   if #available(macOS 26.0, *) {
@@ -150,6 +180,7 @@ func askFM(_ instructions: String, _ prompt: String) async throws -> String? {
   return nil
 }
 
+/// stripFence: Removes code fences.
 func stripFence(_ s: String) -> String {
   var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
   if t.hasPrefix("```") { t = t.components(separatedBy: "\n").dropFirst().joined(separator: "\n"); if let r = t.range(of: "```", options: .backwards) { t = String(t[..<r.lowerBound]) } }
@@ -157,6 +188,10 @@ func stripFence(_ s: String) -> String {
 }
 
 // One request → JSON-able result (throws on error). Shared by one-shot and --serve.
+/// handle: Dispatches one request by mode.
+/// Why these APIs: Vision (VNRecognizeTextRequest): runs Apple on-device OCR (uses the Neural Engine when it
+///   helps); CoreGraphics/AppKit images: loads the screenshot pixels for Vision; JSONEncoder: returns results as
+///   JSON to the Node server.
 func handle(_ args: [String], _ inp: [String: Any]) async throws -> Any {
   let t0 = nowMs()
   switch args.first {
@@ -199,9 +234,15 @@ func handle(_ args: [String], _ inp: [String: Any]) async throws -> Any {
     return enc(Out(tables: tables, ms: Int(nowMs() - t0), engine: engine))
   }
 }
+/// errText: Error text.
 func errText(_ e: Error) -> String { let n = e as NSError; return n.domain == NSCocoaErrorDomain ? String(describing: e) : (n.code == 1 ? n.domain : String(describing: e)) }
 
+/// TQVision: Entry point.
+/// Why these APIs: Vision (VNRecognizeTextRequest): runs Apple on-device OCR (uses the Neural Engine when it
+///   helps); JSONEncoder: returns results as JSON to the Node server.
 @main struct TQVision {
+  /// main: Parses args and runs a mode or the serve loop.
+  /// Why these APIs: JSONEncoder: returns results as JSON to the Node server.
   static func main() async {
     let args = Array(CommandLine.arguments.dropFirst())
     if args.first == "--serve" {
