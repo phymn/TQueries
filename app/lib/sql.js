@@ -7,15 +7,18 @@ const DIALECTS = {
   oracle: { name: 'Oracle', notes: 'Oracle: FETCH FIRST n ROWS ONLY, SYSDATE, TO_CHAR/TO_DATE, TRUNC(date), NVL, no AS for table aliases.' },
   access: { name: 'Microsoft Access', notes: 'Access SQL (Jet/ACE): TOP n, square brackets for names with spaces, Date(), Now(), Format(), DateAdd/DateDiff, IIf, Nz, # date literals #, nested parentheses for multiple JOINs, & for string concat.' }
 };
+// schemaText: Schema as text for model prompts.
 function schemaText(tables) {
   return tables.map(t => `TABLE ${t.name} (\n` + t.columns.map(c => `  ${c.name} ${c.type || ''}`.trimEnd()).join(',\n') + '\n)').join('\n\n');
 }
 // Sample values (photo rows) so the model can match names/values, e.g. 'James' is an L_NAME.
+// sampleText: A few sample rows per table for the prompt.
 function sampleText(tables, n = 5) {
   const out = tables.filter(t => t.rows && t.rows.length).map(t => `${t.name} rows (${t.columns.map(c => c.name).join(' | ')}):\n` +
     t.rows.slice(0, n).map(r => '  ' + r.map(v => v == null ? 'NULL' : String(v).slice(0, 40)).join(' | ')).join('\n'));
   return out.length ? 'Sample data:\n' + out.join('\n') + '\n' : '';
 }
+// joinText: Known join keys as prompt text.
 function joinText(joins) { if (!joins || !joins.length) return '';
   // v0.5.3: name link tables (2+ foreign keys) so the model joins through them for 3+ table questions.
   const by = {}; for (const f of joins) (by[f.table] = by[f.table] || []).push(f.parent);
@@ -28,6 +31,7 @@ const PRECISION = `- Select ONLY the columns the user asked for (if they ask for
 - Join columns may have different names (e.g. DEP_ID = DEPT_ID_DEP); use the Joins line and the sample values.
 - Use every value the user typed (names, numbers, IDs, dates, codes) EXACTLY as typed in the WHERE clause. Never replace it with a different value from the sample rows.
 - Find the column that holds each typed value by looking at the sample rows. If it could be in several columns, filter with OR across them.`;
+// sqlPrompt: Builds the text-to-SQL prompt.
 function sqlPrompt({ tables, dialect, request, lang, joins }) {
   const d = DIALECTS[dialect] || DIALECTS.postgresql;
   return `Write ONE ${d.name} SQL statement that does exactly what the request asks: SELECT to retrieve, or INSERT / UPDATE / DELETE / other SQL when the request asks to change data. Only if the request asks for a transaction, write ONE block: ${d.name} begin-transaction; the statements; COMMIT (or ROLLBACK if asked). Use any SQL functions or operations needed. ${d.notes} Date math: for an age or full years between two dates, give exact completed years (subtract 1 when the anniversary hasn't come yet this year), using today's date from the database (${d.name} date functions).
@@ -47,6 +51,8 @@ const VISION_PROMPT = `Read EVERY database table in this image (there may be sev
 {"tables":[{"name":"CLIENTS","columns":["CLIENT_ID","NAME"],"rows":[["1","84logic"]]},{"name":"INVOICES","columns":["INV_ID","CLIENT_ID"],"rows":[["10","1"]]}]}
 Exact column names. A header split over lines is one name (EMP_ + ID = EMP_ID). If a table has no visible name, name it from its columns in plural UPPERCASE (e.g. EMPLOYEES, DEPARTMENTS). Rows: copy values exactly, max 20 per table; omit "rows" if none.`;
 
+// extractJson: Pulls the first JSON object out of model output.
+// Why these APIs: JSON.parse: parses structured data.
 function extractJson(text) {
   const s = String(text || '').replace(/```(?:json)?/gi, '');
   const pairs = [['{', '}'], ['[', ']']]; const ai = s.indexOf('['), oi = s.indexOf('{');
@@ -58,6 +64,7 @@ function extractJson(text) {
   }
   return null;
 }
+// normalizeTables: Normalizes table objects from any input shape.
 function normalizeTables(obj) {
   const list = Array.isArray(obj) ? obj : (obj && obj.tables) || [];
   return list.filter(t => t && t.name).map(t => ({ name: String(t.name).trim(),
@@ -65,9 +72,12 @@ function normalizeTables(obj) {
     .map(t => { const src = list.find(x => x && String(x.name).trim() === t.name); if (Array.isArray(src.rows) && src.rows.length) t.rows = alignRows(t, src.rows); if (!t.rows || !t.rows.length) delete t.rows; return t; });
 }
 // Wrapped headers: 'EMP_\nID' / 'EMP_ ID' -> 'EMP_ID'.
+// fixName: Cleans a column name.
 function fixName(n) { return String(n).trim().replace(/\s*_\s*/g, '_').replace(/\s*\n\s*/g, ''); }
+// alignRows: Aligns rows to the column count.
 function alignRows(t, rows) { return require('./testdb').alignRows(t, rows); }
 // Fix loop: rewrite a query in the same dialect.
+// fixPrompt: Builds the prompt to fix a broken query.
 function fixPrompt({ tables, dialect, sql, request, fix, lang, result }) {
   const d = DIALECTS[dialect] || DIALECTS.postgresql;
   return `You are an expert SQL report writer. Rewrite this ${d.name} query to apply the requested fix. Keep the ${d.name} dialect.
@@ -89,10 +99,12 @@ Answer in exactly this format:
 \`\`\`
 EXPLANATION: <2-3 short sentences in ${lang === 'es' ? 'Spanish' : 'English'}>`;
 }
+// sqliteTranslatePrompt: Prompt to translate a query into SQLite for testing.
 function sqliteTranslatePrompt(sql, dialect, tables) {
   return `Translate this ${(DIALECTS[dialect] || {}).name || dialect} query to SQLite so it returns the same result. Tables:\n${schemaText(tables)}\n\n\`\`\`sql\n${sql}\n\`\`\`\nAnswer with ONLY the SQLite query in a \`\`\`sql block.`;
 }
 // Manual entry: "Table(col type, col2)" lines, CREATE TABLE statements, or "Table: a, b, c".
+// parseSchemaText: Parses pasted CREATE TABLE / column-list text into tables.
 function parseSchemaText(text) {
   const out = []; const src = String(text || '');
   const re = /(?:create\s+table\s+(?:if\s+not\s+exists\s+)?)?([\[\]`"\w.\s]+?)\s*\(([\s\S]*?)\)\s*;?\s*(?=\n\s*\n|\n?\s*(?:create\s+table|[\w\[\]`"]+\s*\(|[\w]+\s*:)|$)/gi;
@@ -103,12 +115,15 @@ function parseSchemaText(text) {
   let m; while ((m = re.exec(src))) { const name = clean(m[1]); if (name) out.push({ name, columns: splitCols(m[2]) }); }
   return out;
 }
+// clean: Strips quotes/brackets from a name.
 function clean(s) { return String(s).trim().replace(/^(create\s+table\s+)/i, '').replace(/[\[\]`"]/g, '').trim(); }
+// splitCols: Splits a column list on top-level commas.
 function splitCols(s) {
   return s.split(/,(?![^(]*\))/).map(x => x.trim()).filter(Boolean)
     .filter(x => !/^(primary|foreign|constraint|unique|key|index|check)\b/i.test(x))
     .map(x => { const p = x.match(/^([\[`"][^\]`"]+[\]`"]|\S+)\s*(.*)$/); return { name: clean(p[1]), type: (p[2] || '').replace(/\b(not null|null|primary key|identity.*|auto_increment|default .*)$/i, '').trim() }; });
 }
+// extractSql: Pulls the SQL statement out of model output.
 function extractSql(text) {
   const t = String(text || '');
   const fence = t.match(/```(?:[a-z0-9_+-]*[ \t]*\n|sql\b)?\s*([\s\S]*?)```/i); // v0.5.3: any fence tag (```sqlite, ```postgresql…)
@@ -118,7 +133,9 @@ function extractSql(text) {
   return { sql: sql.trim(), explanation };
 }
 const KEYWORDS = new Set(('select from where and or not in is null as on join inner left right full outer cross group by order having limit top offset fetch first next rows row only distinct union all case when then else end asc desc between like ilike exists with count sum avg min max coalesce isnull ifnull nvl nz iif cast convert date datetime int integer varchar text decimal numeric year month day now getdate sysdate current_date current_timestamp interval date_trunc strftime julianday datediff dateadd date_sub date_add format to_char to_date trunc round over partition rank row_number dense_rank lag lead extract upper lower trim substring substr concat length len true false percent ties values into set by hour minute second week quarter dateserial dpart datepart').split(' '));
+// stripLiterals: Removes string literals before scanning identifiers.
 function stripLiterals(sql) { return sql.replace(/'(?:[^']|'')*'/g, "''").replace(/#[^#\n]*#/g, '#d#').replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, ''); }
+// validate: Checks a query only uses known tables/columns.
 function validate(sql, tables) {
   const problems = [], warnings = [];
   const tnames = new Map(tables.map(t => [t.name.toLowerCase(), t]));
@@ -126,6 +143,7 @@ function validate(sql, tables) {
   const changes = /^\s*(insert|update|delete|merge|drop|alter|truncate|create|replace)\b/i.test(stripLiterals(sql)) || /^\s*with\b[\s\S]*\b(insert|update|delete)\b/i.test(stripLiterals(sql));
   const writes = changes ? 'writes' : null;
   const s = stripLiterals(sql);
+  // unq: Unquotes an identifier.
   const unq = x => x.replace(/[\[\]`"]/g, '');
   const ident = '((?:\\[[^\\]]+\\]|`[^`]+`|"[^"]+"|[A-Za-z_][\\w$]*)(?:\\.(?:\\[[^\\]]+\\]|`[^`]+`|"[^"]+"|[A-Za-z_][\\w$]*))*)';
   const aliases = new Map(); const ctes = new Set();
@@ -151,6 +169,7 @@ function validate(sql, tables) {
   return { ok: problems.length === 0, problems: [...new Set(problems)], warnings: [...new Set(warnings)], changesData: !!writes };
 }
 // SQLite: real EXPLAIN against an empty in-memory DB, when node:sqlite exists (Node 22.5+).
+// sqliteExplain: Asks SQLite to EXPLAIN the query against an empty schema to catch errors.
 function sqliteExplain(sql, tables) {
   let DB; try { DB = require('node:sqlite').DatabaseSync; } catch { return { ran: false }; }
   const db = new DB(':memory:');
@@ -162,13 +181,16 @@ function sqliteExplain(sql, tables) {
 }
 const STOP = new Set('a an the of for in on at by to from and or with without per all each every show me give get list find what which who whose is are was were de del la el los las por para con y o en un una que cual quien dame muestra lista total sum count average avg max min top first last name names department table tables report'.split(' '));
 // Values the user typed that the query must contain (any table set): quoted text, IDs/codes/dates, and any word or number found in the sample rows.
+// inputValues: Literal values (names, numbers, dates) the user typed.
 function inputValues(request, tables) {
   const req = String(request || ''); const out = new Map();
+  // add: Adds a value once.
   const add = v => { v = String(v).trim(); if (v && !out.has(v.toLowerCase())) out.set(v.toLowerCase(), v); };
   // v0.4.1: possessive/contraction apostrophes (employee's, employees') never open a quote.
   let txt = req.replace(/([A-Za-zÀ-ÿ])['’]([A-Za-zÀ-ÿ])/g, '$1\u0001$2').replace(/([sS])['’](?=\s|$|[,.;:!?])/g, '$1\u0001');
   const CUE = /(?:\blike|\bas|\bformat(?:ted)?|\bformato|\bcomo|e\.g\.?|\bsuch as|\bpor ejemplo|\bej\.?|\bexample|\bejemplo|\bstyle|\bestilo)\s*[:,]?\s*$/i;
   const MONTH = /\b(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|aug(ust)?|sep(t(ember)?)?|oct(ober)?|nov(ember)?|dec(ember)?|enero|febrero|marzo|abril|mayo|junio|julio|agosto|se(p)?tiembre|octubre|noviembre|diciembre)\b/i;
+  // isDateExample: True if a quoted date is only an example format.
   const isDateExample = q => MONTH.test(q) && /\d/.test(q) || /^\s*\d{1,4}[\/.-]\d{1,2}[\/.-]\d{1,4}\s*$/.test(q) || /^[ymdhs\/.:,\s-]+$/i.test(q) && /yy|mm|dd/i.test(q);
   txt = txt.replace(/["'“”‘’]([^"'“”‘’]+)["'“”‘’]/g, (m, q, i) => { if (CUE.test(txt.slice(0, i)) || isDateExample(q)) return ' '; add(q.replace(/\u0001/g, "'")); return ' '; });
   txt = txt.replace(/\b(?:like|as|e\.g\.?|such as|como|formato|format)\s+((?:[A-Za-zÀ-ÿ]+\s+)?\d{1,2},?\s+\d{4})/gi, ' '); // unquoted date examples
@@ -186,7 +208,9 @@ function inputValues(request, tables) {
   return [...out.values()];
 }
 // Literal values in the SQL that come from the data but were never typed (a swapped value, e.g. 'Alice' for 'James').
+// sqlLiterals: Literals present in the SQL.
 function sqlLiterals(sql) { return [...String(sql || '').matchAll(/'((?:[^']|'')*)'/g)].map(m => m[1].replace(/''/g, "'")); }
+// inputCheck: Flags user values missing from the SQL.
 function inputCheck(sql, request, tables) {
   const need = inputValues(request, tables), s = String(sql || '').toLowerCase();
   const missing = need.filter(v => { const l = v.toLowerCase(); return /^\d+(\.\d+)?$/.test(l) ? !new RegExp('(^|[^\\w.])' + l.replace('.', '\\.') + '($|[^\\w.])').test(s) : !s.includes(l); });
@@ -201,6 +225,7 @@ function inputCheck(sql, request, tables) {
   return { ok: !missing.length && !swapped.length && !wrongColumn.length, need, missing, swapped, wrongColumn };
 }
 // Deterministic repair: a typed value filtered on the wrong column is moved to the column(s) that actually hold it.
+// fixColumns: Replaces a wrong column name with the closest real one.
 function fixColumns(sql, wrongColumn) {
   let out = sql;
   for (const w of wrongColumn) {

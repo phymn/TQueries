@@ -5,25 +5,35 @@ const { Worker } = require('worker_threads');
 const VENDOR = path.join(__dirname, '..', 'vendor', 'sql.js');
 const MAX_ROWS = 200, TIMEOUT_MS = 5000;
 
+// lc: Lowercases safely.
 const lc = s => String(s || '').toLowerCase();
+// singular: Crude singular form.
 const singular = s => lc(s).replace(/ies$/, 'y').replace(/(ses|xes)$/, s => s.slice(0, -2)).replace(/s$/, '');
+// schemaHash: Stable hash of a schema so sample data is cached per schema.
+// Why these APIs: JSON.stringify: serializes results into a plain string that can cross the script boundary.
 const schemaHash = tables => crypto.createHash('sha1').update(JSON.stringify(tables.map(t => [t.name, t.columns.map(c => [c.name, c.type])]))).digest('hex').slice(0, 12);
 
 // Primary key: <Table>ID / <singular>ID / Id / first column ending in id / first column.
+// idish: True for id-like column names.
 const idish = n => /id$|(^|_)id(_|$)/i.test(n);
+// pkOf: Guesses a table's primary key.
 function pkOf(t) {
   const cs = t.columns, n = singular(t.name);
   return (cs.find(c => [lc(t.name) + 'id', n + 'id', n + '_id', 'id'].includes(lc(c.name))) || (cs[0] && idish(cs[0].name) ? cs[0] : null) || cs.find(c => /id$/i.test(c.name)) || cs[0] || {}).name;
 }
 // Name tokens without the "id" part: DEPT_ID_DEP -> [dept, dep]; CustomerID -> [customer].
+// toks: Tokens of a name.
 const toks = s => String(s).replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(x => x && x !== 'id' && x !== 'no' && x !== 'num');
+// similar: Name similarity score.
 const similar = (a, b) => a.some(x => b.some(y => x.length >= 3 && y.length >= 3 && (x.startsWith(y) || y.startsWith(x))));
+// overlap: Value overlap between two columns.
 function overlap(t, col, p, pcol) { // share of child values found in parent (photo rows only); null if unknown
   if (!t.rows || !p.rows) return null; const ci = t.columns.findIndex(c => c.name === col), pi = p.columns.findIndex(c => c.name === pcol);
   const keys = new Set(p.rows.map(r => String(r[pi]))), vals = t.rows.map(r => r[ci]).filter(v => v != null && v !== '');
   return vals.length ? vals.filter(v => keys.has(String(v))).length / vals.length : null;
 }
 // Foreign keys: a non-PK column whose name equals another table's PK (or <singular>ID of it).
+// inferFks: Infers foreign keys from names and values.
 function inferFks(tables) {
   const fks = [];
   for (const t of tables) { const pk = pkOf(t);
@@ -35,10 +45,12 @@ function inferFks(tables) {
   return fks;
 }
 // Deterministic, non-AI sample generator (seeded) — fallback when the model fails.
+// rng: Seeded random generator so sample data is reproducible.
 function rng(seed) { let s = seed >>> 0 || 1; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
 const NAMES = ['Ana Torres', 'Luis Pérez', 'María Gómez', 'Carlos Ruiz', 'Sofía Díaz', 'Jorge Castro', 'Lucía Romero', 'Pedro Vargas', 'Elena Morales', 'Diego Herrera', 'Valeria Ortiz', 'Andrés Silva'];
 const CO = ['84logic', 'Northwind Supply', 'Blue Harbor LLC', 'Summit Tools', 'Rio Grande Foods', 'Cedar & Co', 'Atlas Print', 'Luna Design'];
 const CITIES = ['Miami', 'Orlando', 'Houston', 'Bogotá', 'Madrid', 'New York', 'Dallas', 'Tampa'];
+// kind: Value kind for a column.
 const kind = c => { const n = lc(c.name), ty = lc(c.type);
   if (/date|time|fecha/.test(n) || /date|time/.test(ty)) return 'date';
   if (/id$/.test(n)) return 'id';
@@ -47,7 +59,9 @@ const kind = c => { const n = lc(c.name), ty = lc(c.type);
   if (/email|correo/.test(n)) return 'email'; if (/phone|tel/.test(n)) return 'phone';
   if (/city|ciudad/.test(n)) return 'city'; if (/compan|empresa|client|customer|cliente/.test(n)) return 'company';
   if (/name|nombre/.test(n)) return 'name'; if (/status|estado/.test(n)) return 'status'; return 'text'; };
+// fakeValue: Generates a plausible fake value (no real data).
 function fakeValue(c, i, r, tname) {
+  // p: Random pick.
   const p = a => a[Math.floor(r() * a.length)];
   switch (kind(c)) {
     case 'id': return i + 1;
@@ -57,9 +71,11 @@ function fakeValue(c, i, r, tname) {
     case 'city': return p(CITIES); case 'company': return p(CO); case 'name': return /prod|item|art/i.test(tname) ? 'Item ' + (i + 1) : p(NAMES);
     case 'status': return p(['Open', 'Paid', 'Pending']); default: return c.name + ' ' + (i + 1); }
 }
+// fallbackRows: Fake rows when no model data is used.
 function fallbackRows(t, n, seed) { const r = rng(seed); const pk = pkOf(t);
   return Array.from({ length: n }, (_, i) => t.columns.map(c => c.name === pk && /id$/i.test(c.name) ? i + 1 : fakeValue(c, i, r, t.name))); }
 // Align rows (arrays or objects) to the table's columns.
+// alignRows: Aligns model rows to the columns.
 function alignRows(t, rows) {
   if (!Array.isArray(rows)) return [];
   return rows.filter(x => x && typeof x === 'object').slice(0, 500).map(row => t.columns.map((c, j) => {
@@ -68,7 +84,9 @@ function alignRows(t, rows) {
 }
 // Make every FK value exist in its parent. Photo rows are never rewritten; generated rows are remapped,
 // and missing parent keys referenced by photo rows are added to generated parents.
+// fixFks: Rewrites foreign keys so joins return rows.
 function fixFks(tables, data, source) {
+  // T: Finds a table by name.
   const fks = inferFks(tables), T = n => tables.find(t => t.name === n);
   for (const fk of fks) {
     const ct = T(fk.table), pt = T(fk.parent), ci = ct.columns.findIndex(c => c.name === fk.column), pi = pt.columns.findIndex(c => c.name === fk.parentColumn);
@@ -81,6 +99,7 @@ function fixFks(tables, data, source) {
   return fks;
 }
 // Prompt for the local SQL model (JSON mode).
+// dataPrompt: Prompt asking the local model for sample data.
 function dataPrompt(tables, fks, n) {
   return `Create realistic sample data for these tables (${n} rows each). Use realistic names, dates in 2025-2026 (YYYY-MM-DD), amounts.
 Foreign keys MUST reference existing parent keys: ${fks.map(f => `${f.table}.${f.column} -> ${f.parent}.${f.parentColumn}`).join('; ') || 'none'}.
@@ -90,13 +109,17 @@ Return ONLY JSON: {"TableName":[[value per column in order], ...], ...}`;
 
 const { translate } = require('./translate');
 // v0.5.3 "Swift Coder": transaction blocks (BEGIN/START TRANSACTION … COMMIT/ROLLBACK) on the practice copy.
+// splitSql: Splits SQL into statements outside quotes.
 function splitSql(sql) { const out = []; let cur = '', q = null;
   for (const ch of String(sql)) { if (q) { cur += ch; if (ch === q) q = null; } else if (ch === "'" || ch === '"') { q = ch; cur += ch; } else if (ch === ';') { if (cur.trim()) out.push(cur.trim()); cur = ''; } else cur += ch; }
   if (cur.trim()) out.push(cur.trim()); return out.map(x => x.replace(/^(--.*\n\s*)+/, '').trim()).filter(Boolean); }
 const TXN_START = /^(begin(\s+(transaction|tran|work))?|start\s+transaction|set\s+transaction\b.*)$/i, TXN_END = /^(commit|rollback)(\s+(transaction|tran|work))?$/i;
+// isTxn: True for transaction statements.
 function isTxn(sql) { const p = splitSql(sql); return p.length >= 2 && TXN_START.test(p[0]) && TXN_END.test(p[p.length - 1]); }
 // SQLite form of a transaction block: one BEGIN, the body, then COMMIT or ROLLBACK.
+// txnSqlite: Rewrites transaction syntax for SQLite.
 function txnSqlite(sql) { const p = splitSql(sql); return { body: p.slice(1, -1).filter(x => !TXN_START.test(x)), end: /^rollback/i.test(p[p.length - 1]) ? 'ROLLBACK' : 'COMMIT' }; }
+// safeCheck: Allows only read-only/safe statements on the test database.
 function safeCheck(sql) {
   const s = String(sql).replace(/'(?:[^']|'')*'/g, "''").replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').trim().replace(/;\s*$/, '');
   // The practice copy is throwaway, so any single statement may run on it (reads and changes). Only engine-level commands are blocked.
@@ -138,6 +161,9 @@ require(path.join(w.vendor, 'sql-wasm.js'))({ locateFile: f => path.join(w.vendo
     parentPort.postMessage({ ok: true, columns, rows, total, truncated: total > rows.length });
   } catch (e) { parentPort.postMessage({ ok: false, error: e.message }); }
 }).catch(e => parentPort.postMessage({ ok: false, error: 'sqljs: ' + e.message }));`;
+// runSqlite: Runs the query in an in-memory SQLite worker with row/time limits.
+// Why these APIs: Web Worker: moves heavy computation off the UI thread so the page stays responsive;
+//   setTimeout: defers or delays work without blocking; clearTimeout/clearInterval: cancels a pending timer.
 function runSqlite(tables, data, sql, { max = MAX_ROWS, timeout = TIMEOUT_MS } = {}) {
   return new Promise(ok => {
     const w = new Worker(WORKER, { eval: true, workerData: { vendor: VENDOR, lib: __dirname, tables, data, sql, max, txn: isTxn(sql) ? txnSqlite(sql) : null } });

@@ -3,8 +3,16 @@
 const fs = require('fs'), path = require('path'), os = require('os'), { spawn, execFile } = require('child_process');
 const DIR = path.join(__dirname, '..', 'native'), SRC = path.join(DIR, 'tq-vision.swift'), BIN = path.join(DIR, 'bin', 'tq-vision');
 const st = { bin: process.env.TQ_VISION_BIN || null, building: null, error: null, caps: null };
+// exec: Runs a command and returns stdout (promise).
+// Why these APIs: child_process: runs a local helper program (no shell string building where avoidable).
 const exec = (cmd, args, ms) => new Promise(ok => execFile(cmd, args, { timeout: ms }, (e, out, err) => ok({ ok: !e, out: String(out || ''), err: String(err || e?.message || '') })));
+// stale: True if the compiled helper is older than its Swift source.
+// Why these APIs: fs stat/list: checks local files before using them.
 function stale() { try { return fs.statSync(BIN).mtimeMs < fs.statSync(SRC).mtimeMs; } catch { return true; } }
+// ensure: Compiles the Swift helper with xcrun on first use (macOS only).
+// Why these APIs: fs write: saves results locally; fs stat/list: checks local files before using them;
+//   node:path: builds file paths portably across macOS/Windows; node:os / process.platform: adapts to the host
+//   OS.
 async function ensure() { // → path to the helper, or null
   if (st.bin) return st.bin; if (process.platform !== 'darwin') return null; if (st.error) return null;
   if (!stale()) return (st.bin = BIN);
@@ -13,6 +21,11 @@ async function ensure() { // → path to the helper, or null
     if (r.ok && fs.existsSync(tmp)) { fs.renameSync(tmp, BIN); return (st.bin = BIN); }
     st.error = r.err.slice(0, 400); return null; })().finally(() => { st.building = null; }));
 }
+// run: Runs the helper once with args/stdin JSON and a timeout.
+// Why these APIs: setTimeout: defers or delays work without blocking; clearTimeout/clearInterval: cancels a
+//   pending timer; JSON.stringify: serializes results into a plain string that can cross the script boundary;
+//   JSON.parse: parses structured data; child_process: runs a local helper program (no shell string building
+//   where avoidable); Buffer: handles raw bytes.
 function run(args, input, ms = 30000) { return new Promise(async (ok, no) => { const bin = await ensure(); if (!bin) return no(new Error('native_unavailable'));
   const p = spawn(bin, args), out = [], err = []; const t = setTimeout(() => p.kill('SIGKILL'), ms);
   p.stdout.on('data', d => out.push(d)); p.stderr.on('data', d => err.push(d)); p.on('error', e => { clearTimeout(t); no(e); });
@@ -21,19 +34,31 @@ function run(args, input, ms = 30000) { return new Promise(async (ok, no) => { c
   p.stdin.on('error', () => {}); if (input !== undefined) p.stdin.end(JSON.stringify(input)); else p.stdin.end(); }); }
 // v0.5.1: one long-lived helper (--serve) keeps Vision and Apple's model loaded between pictures.
 const srv = { p: null, n: 0, wait: new Map(), buf: '' };
+// serve: Starts the persistent helper so Apple models stay warm between requests.
+// Why these APIs: clearTimeout/clearInterval: cancels a pending timer; JSON.parse: parses structured data;
+//   child_process: runs a local helper program (no shell string building where avoidable).
 function serve() { if (srv.p) return srv.p; const bin = st.bin; if (!bin) return null;
   const p = spawn(bin, ['--serve']); srv.p = p; p.stdin.on('error', () => {});
   p.stdout.on('data', d => { srv.buf += d; let i; while ((i = srv.buf.indexOf('\n')) >= 0) { const line = srv.buf.slice(0, i); srv.buf = srv.buf.slice(i + 1);
     let j; try { j = JSON.parse(line); } catch { continue; } const w = srv.wait.get(j.id); if (!w) continue; srv.wait.delete(j.id); clearTimeout(w.t);
     j.error ? w.no(new Error(j.error)) : w.ok(j.ok); } });
+  // down: Stops the persistent helper.
+  // Why these APIs: clearTimeout/clearInterval: cancels a pending timer.
   const down = () => { if (srv.p !== p) return; srv.p = null; srv.buf = ''; for (const w of srv.wait.values()) { clearTimeout(w.t); w.no(new Error('native_failed')); } srv.wait.clear(); };
   p.on('close', down); p.on('error', down); return p; }
+// ask: Sends one request to the persistent helper, falling back to a one-shot run.
+// Why these APIs: setTimeout: defers or delays work without blocking; JSON.stringify: serializes results into a
+//   plain string that can cross the script boundary.
 async function ask(args, input, ms = 60000) { const bin = await ensure(); if (!bin) throw new Error('native_unavailable');
   const p = serve(); if (!p) return run(args, input, ms);
   return new Promise((ok, no) => { const id = ++srv.n; const t = setTimeout(() => { srv.wait.delete(id); no(new Error('native_timeout')); }, ms);
     srv.wait.set(id, { ok, no, t }); p.stdin.write(JSON.stringify({ id, args, input }) + '\n'); }); }
+// warm: Pre-starts the helper in the background.
 const warm = () => ask(['--warm'], undefined, 60000);
 // v0.5.1 "Clean Cells": Apple's model reads each table crop as CSV, cross-checked against Vision word positions.
+// readCells: Reads table cells from images with Vision word boxes plus the model, cross-checked.
+// Why these APIs: fs write: saves results locally; node:path: builds file paths portably across macOS/Windows;
+//   node:os / process.platform: adapts to the host OS; Buffer: handles raw bytes.
 async function readCells(imgs, log = () => {}) { const C = require('./cells'), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tq-')); const t0 = Date.now(), out = [], timing = { words: 0, csv: 0 }; let fm = true;
   try { for (const [i, b] of imgs.entries()) { const f = path.join(dir, `img${i}.png`); fs.writeFileSync(f, Buffer.from(b, 'base64'));
       const w = await ask(['--words', f], undefined, 90000); timing.words += w.ms || 0; const pos = C.positionTables(w.words || []);
@@ -44,6 +69,9 @@ async function readCells(imgs, log = () => {}) { const C = require('./cells'), d
   finally { fs.rmSync(dir, { recursive: true, force: true }); } // our own temp copies only
   return { tables: out, ms: Date.now() - t0, timing, engine: fm ? 'apple-csv+vision' : 'vision-position' }; }
 // v0.5.2 "Instant Read": Vision positions first (~0.1 s), Apple's CSV cross-check afterwards in the background.
+// readFast: Fast path: Apple document reader only.
+// Why these APIs: fs write: saves results locally; node:path: builds file paths portably across macOS/Windows;
+//   node:os / process.platform: adapts to the host OS; Buffer: handles raw bytes.
 async function readFast(imgs, log = () => {}) { const C = require('./cells'), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tq-')), t0 = Date.now(), per = [];
   try { for (const [i, b] of imgs.entries()) { const f = path.join(dir, `img${i}.png`); fs.writeFileSync(f, Buffer.from(b, 'base64'));
       const w = await ask(['--words', f], undefined, 90000); per.push({ f, pos: C.positionTables(w.words || []) }); } }
@@ -56,11 +84,17 @@ async function readFast(imgs, log = () => {}) { const C = require('./cells'), di
     finally { fs.rmSync(dir, { recursive: true, force: true }); } // our own temp copies only
     return { tables: out, ms: Date.now() - t, engine: fm ? 'apple-csv+vision' : 'vision-position' }; })();
   return { tables, ms, check, engine: 'vision-position' }; }
+// caps: Reports which Apple engines are available.
 async function caps() { if (st.caps) return st.caps; try { return (st.caps = await run(['--check'], undefined, 10000)); } catch { return { documents: false, fm: false }; } }
 // images: base64 strings → {tables, ms, engine}
+// readImages: Writes images to temp files and reads tables with the helper.
+// Why these APIs: fs write: saves results locally; node:path: builds file paths portably across macOS/Windows;
+//   node:os / process.platform: adapts to the host OS; Buffer: handles raw bytes.
 async function readImages(imgs) { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tq-')); try {
   const files = imgs.map((b, i) => { const f = path.join(dir, `img${i}.png`); fs.writeFileSync(f, Buffer.from(b, 'base64')); return f; });
   return await run(files); } finally { fs.rmSync(dir, { recursive: true, force: true }); } } // our own temp copies only
+// tidy: Tidies table names with Apple Foundation Models.
 const tidy = tables => run(['--fm'], { tables }, 20000);
+// sql: Asks Apple's on-device model for SQL.
 const sql = (schema, dialect, question) => run(['--sql'], { schema, dialect, question }, 30000);
 module.exports = { ask, warm, readCells, readFast, ensure, run, caps, readImages, tidy, sql, state: st, BIN, SRC };

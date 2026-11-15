@@ -1,52 +1,78 @@
 // TQueries v0.5 "Instant" — deterministic SQL for common questions, in all 6 dialects. Pure, no network, ~1 ms.
 // Returns { sql, explanation, pattern } when confident, or null (the local model takes over).
 const MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+// lc: Lowercases safely.
 const lc = s => String(s || '').toLowerCase();
+// words: Words of a column name.
 const words = n => lc(n).replace(/([a-z])([A-Z])/g, '$1_$2').split(/[^a-z0-9áéíóúñ]+/).filter(Boolean);
 const ABBR = { f: 'first', fname: 'first', l: 'last', lname: 'last', b: 'birth', dob: 'birth', bdate: 'birth', dep: 'department', dept: 'department', emp: 'employee', qty: 'quantity', amt: 'amount', addr: 'address', cust: 'customer', inv: 'invoice', no: 'number', num: 'number', desc: 'description', mgr: 'manager', loc: 'location', sal: 'salary' };
 const ES = { nombre: 'name', apellido: 'last', salario: 'salary', sueldo: 'salary', direccion: 'address', dirección: 'address', departamento: 'department', fecha: 'date', nacimiento: 'birth', ciudad: 'city', cliente: 'customer', total: 'total', precio: 'price', cantidad: 'quantity' };
 const KIND = {
+  // first: Finds a first-name column.
   first: n => /^(f_?name|first_?name|fname|given_?name|nombre)$/i.test(n),
+  // last: Finds a last-name column.
   last: n => /^(l_?name|last_?name|lname|surname|apellidos?)$/i.test(n),
+  // name: Finds a name column.
   name: n => /(^|_)(name|nombre)$/i.test(n),
+  // birth: Finds a birth-date column.
   birth: n => /(^|_)(b_?date|birth\w*|dob|f_?nac\w*|nacimiento)$/i.test(n) || /birth|nacim/i.test(n),
+  // date: Finds a date column.
   date: n => /date|fecha|_dt$|time/i.test(n),
 };
 const NUMWORDS = /salary|salario|sueldo|amount|total|price|precio|qty|quantity|cantidad|cost|costo|wage|pay|balance|score|age|edad|count|monto|importe/i;
 
+// q: Quotes an identifier for the dialect.
 function q(d, name) { return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : d === 'mysql' ? '`' + name + '`' : (d === 'sqlserver' || d === 'access') ? '[' + name + ']' : '"' + name.replace(/"/g, '""') + '"'; }
+// str: Quotes a string literal.
 const str = v => "'" + String(v).replace(/'/g, "''") + "'";
 
 // Dialect builders
+// DX: Dialect toolkit: per-dialect SQL snippets for dates, strings and math.
 function DX(d) {
   const ss = d === 'sqlserver', my = d === 'mysql', pg = d === 'postgresql', ora = d === 'oracle', acc = d === 'access', lite = d === 'sqlite';
   const today = ss ? 'CAST(GETDATE() AS DATE)' : my ? 'CURDATE()' : pg ? 'CURRENT_DATE' : ora ? 'TRUNC(SYSDATE)' : acc ? 'Date()' : "date('now', 'localtime')";
+  // dateLit: Date literal in the dialect.
   const dateLit = iso => acc ? `#${+iso.slice(5, 7)}/${+iso.slice(8, 10)}/${iso.slice(0, 4)}#` : (pg || ora) ? `DATE '${iso}'` : `'${iso}'`;
+  // liteMonth: Month name expression for SQLite (no native function).
   const liteMonth = c => `CASE strftime('%m', ${c})${MON.map((m, i) => ` WHEN '${String(i + 1).padStart(2, '0')}' THEN '${m}'`).join('')} END`;
   const X = {
     today, dateLit,
+    // len: String length expression.
     len: c => ss ? `LEN(${c})` : my ? `CHAR_LENGTH(${c})` : acc ? `Len(${c})` : `LENGTH(${c})`,
+    // cat: String concatenation with a separator.
     cat: (parts, sep = " ' ' ") => { sep = sep.trim(); return my ? `CONCAT(${parts.join(`, ${sep}, `)})` : parts.join(ss ? ` + ${sep} + ` : acc ? ` & ${sep} & ` : ` || ${sep} || `); },
+    // cat0: String concatenation without separator.
     cat0: parts => my ? `CONCAT(${parts.join(', ')})` : parts.join(ss ? ' + ' : acc ? ' & ' : ' || '),
+    // left1: First character expression.
     left1: c => (ora || lite) ? `SUBSTR(${c}, 1, 1)` : acc ? `Left(${c}, 1)` : `LEFT(${c}, 1)`,
+    // fmtDate: Formats a date as "Month D, YYYY".
     fmtDate: c => ss ? `FORMAT(${c}, 'MMMM d, yyyy')` : my ? `DATE_FORMAT(${c}, '%M %e, %Y')` : pg ? `TO_CHAR(${c}, 'FMMonth FMDD, YYYY')` : ora ? `TO_CHAR(${c}, 'fmMonth DD, YYYY')` : acc ? `Format(${c}, 'mmmm d, yyyy')`
       : `${liteMonth(c)} || ' ' || CAST(strftime('%d', ${c}) AS INTEGER) || ', ' || strftime('%Y', ${c})`,
+    // month: Month number expression.
     month: c => ss ? `DATENAME(MONTH, ${c})` : my ? `MONTHNAME(${c})` : pg ? `TO_CHAR(${c}, 'FMMonth')` : ora ? `TO_CHAR(${c}, 'fmMonth')` : acc ? `MonthName(Month(${c}))` : liteMonth(c),
     // completed years between birth c and date x
+    // age: Age in whole years expression.
     age: (c, x) => ss ? `DATEDIFF(YEAR, ${c}, ${x}) - CASE WHEN DATEADD(YEAR, DATEDIFF(YEAR, ${c}, ${x}), ${c}) > ${x} THEN 1 ELSE 0 END`
       : my ? `TIMESTAMPDIFF(YEAR, ${c}, ${x})` : pg ? `DATE_PART('year', AGE(${x}, ${c}))` : ora ? `TRUNC(MONTHS_BETWEEN(${x}, ${c}) / 12)`
       : acc ? `DateDiff('yyyy', ${c}, ${x}) + IIf(DateSerial(Year(${x}), Month(${c}), Day(${c})) > ${x}, -1, 0)`
       : `(CAST(strftime('%Y', ${x}) AS INTEGER) - CAST(strftime('%Y', ${c}) AS INTEGER) - (strftime('%m-%d', ${x}) < strftime('%m-%d', ${c})))`,
+    // daysToBirthday: Days until next birthday expression.
     daysToBirthday: c => { const n = acc ? `1 + ${X.age(c, today)}` : `(${X.age(c, today)}) + 1`;
       return ss ? `DATEDIFF(DAY, ${today}, DATEADD(YEAR, ${n}, ${c}))` : my ? `DATEDIFF(DATE_ADD(${c}, INTERVAL (${n}) YEAR), ${today})`
         : pg ? `MAKE_DATE(CAST(DATE_PART('year', ${c}) AS INT) + ${n}, CAST(DATE_PART('month', ${c}) AS INT), CAST(DATE_PART('day', ${c}) AS INT)) - ${today}`
         : ora ? `ADD_MONTHS(${c}, 12 * (${n})) - ${today}` : acc ? `DateDiff('d', ${today}, DateAdd('yyyy', ${n}, ${c}))`
         : `CAST(julianday(date(${c}, '+' || (${n}) || ' years')) - julianday(${today}) AS INTEGER)`; },
+    // avg: Average expression.
     avg: c => ss ? `AVG(${c} * 1.0)` : `AVG(${c})`,
+    // sd: Standard deviation expression.
     sd: c => ss ? `STDEV(${c})` : ora ? `STDDEV(${c})` : acc ? `StDev(${c})` : lite ? `SQRT((SUM(${c} * ${c}) - SUM(${c}) * SUM(${c}) * 1.0 / COUNT(${c})) / (COUNT(${c}) - 1))` : `STDDEV_SAMP(${c})`,
+    // roundTo: Rounding expression.
     roundTo: (c, places) => places < 0 && (acc || lite) ? `ROUND(${c} / ${10 ** -places}.0, 0) * ${10 ** -places}` : `ROUND(${c}, ${places})`,
+    // iif: Conditional expression (CASE/IIF).
     iif: (cond, a, b) => acc ? `IIf(${cond}, ${a}, ${b})` : `CASE WHEN ${cond} THEN ${a} ELSE ${b} END`,
+    // like: LIKE pattern literal.
     like: v => acc ? `'*${String(v).replace(/'/g, "''")}*'` : `'%${String(v).replace(/'/g, "''")}%'`,
+    // select: Assembles a SELECT with TOP/LIMIT/FETCH per dialect.
     select: ({ cols, from, where, group, order, limit }) => {
       const top = limit && (ss || acc) ? `TOP ${limit} ` : '';
       let s = `SELECT ${top}${cols.join(', ')}\nFROM ${from}`;
@@ -58,8 +84,11 @@ function DX(d) {
 }
 
 // Column matching
+// colPhrases: Phrases that refer to a column.
 function colPhrases(c) { const w = words(c.name).map(x => ABBR[x] || x); return /(^|_)id$/i.test(c.name) ? [w.join(' ')] : [w.join(' '), w.filter(x => x !== 'id').join(' ')].filter(Boolean); }
+// normReq: Normalizes the request text.
 function normReq(r) { return ' ' + lc(r).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9ñ'%]+/g, ' ').split(' ').map(x => ES[x] || x.replace(/s$/, '')).join(' ') + ' '; }
+// mentioned: Columns mentioned in the request.
 function mentioned(req, t) { // columns of table t named in the request (exact name or expanded phrase)
   const R = normReq(req), raw = lc(req), out = [];
   for (const c of t.columns) { const n = lc(c.name);
@@ -67,13 +96,18 @@ function mentioned(req, t) { // columns of table t named in the request (exact n
     for (const p of colPhrases(c)) { const pp = p.split(' ').map(x => x.replace(/s$/, '')).join(' '); if (pp && pp.length >= 3 && R.includes(' ' + pp + ' ')) { out.push(c.name); break; } } }
   return out;
 }
+// find: Finds a column by key.
 const find = (t, k) => (t.columns.find(c => KIND[k](c.name)) || {}).name;
+// isNumCol: True if a column is numeric (from data or type).
 const isNumCol = (t, n) => { const i = t.columns.findIndex(c => c.name === n), c = t.columns[i]; if (/int|num|dec|real|float|money|double/i.test(c.type || '')) return true;
   if (t.rows && t.rows.length) return t.rows.every(r => r[i] == null || r[i] === '' || !isNaN(Number(r[i]))) && !/(^|_)id$|_id_|code|zip|phone|ssn/i.test(n); return NUMWORDS.test(n); };
+// isTextCol: True if a column is text.
 const isTextCol = (t, n) => !isNumCol(t, n) && !KIND.date(n);
+// labelCols: Columns suitable as labels.
 function labelCols(t) { const f = find(t, 'first'), l = find(t, 'last'); if (f && l) return [f, l]; const n = t.columns.find(c => KIND.name(c.name) && !/_id$/i.test(c.name)); return n ? [n.name] : [t.columns[0].name]; }
 
 // Typed values -> column in main table that holds them
+// valueFilters: WHERE filters for literal values found in the request.
 function valueFilters(tables, main, request, S) {
   const vals = S.inputValues(request, tables), out = [], other = [];
   for (const v of vals) { const l = lc(v); let hit = null;
@@ -82,7 +116,9 @@ function valueFilters(tables, main, request, S) {
   return { filters: out, unknown: other };
 }
 
+// build: Instant SQL from known request patterns (no model needed).
 function build(tables, request, dialect, S, TD) {
+  // Q: Quotes an identifier.
   const X = DX(dialect), Q = n => q(dialect, n), r = lc(request), R = normReq(request);
   // main table: most mentioned columns; ties -> one with birth date / first table
   const scored = tables.map(t => ({ t, m: mentioned(request, t), b: find(t, 'birth') ? 1 : 0, named: R.includes(' ' + words(t.name).join(' ').replace(/s$/, '') + ' ') ? 1 : 0 }));
@@ -102,9 +138,12 @@ function build(tables, request, dialect, S, TD) {
     return { pattern: 'join', sql: X.select({ cols, from: `${Q(main.name)} m\n${dialect === 'oracle' ? '' : ''}JOIN ${Q(o.name)} o ON ${fk.table === main.name ? on : onR}` }), explanation: ['Joins the two tables on their matching key.', 'Une las dos tablas por su clave común.'] };
   }
   const where = vf.filters.map(([c, v]) => `${Q(c)} = ${isNumCol(main, c) && !isNaN(Number(v)) ? v : str(v)}`);
+  // sel: Builds a select list.
   const from = Q(main.name), sel = (cols, extra = {}) => X.select({ cols, from, where, ...extra });
+  // withLbl: Adds an alias label to an expression.
   const withLbl = (expr, alias) => [...(vf.filters.length ? [] : lbl), `${expr} AS ${alias}`];
   const year = (r.match(/\b(1[89]\d{2}|20\d{2})\b/) || [])[1];
+  // textCol: Main text column.
   const textCol = () => textM[0] || first || (main.columns.find(c => KIND.name(c.name)) || {}).name;
 
   // 1. character count
@@ -171,6 +210,7 @@ function build(tables, request, dialect, S, TD) {
   return null;
 }
 
+// match: Entry point: tries pattern and join builders and validates the result.
 function match(tables, request, dialect, lang) {
   const S = require('./sql'), TD = require('./testdb'); const t0 = process.hrtime.bigint();
   let out = null; try { out = build(tables, request, dialect, S, TD); } catch { out = null; }
